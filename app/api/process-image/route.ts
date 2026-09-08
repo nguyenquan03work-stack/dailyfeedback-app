@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 // Vision calls can take a few seconds; give it room.
 export const maxDuration = 60;
 
-const MODEL = "gemini-2.0-flash";
+const MODEL = "gemini-flash-latest"; // alias -> luon la ban flash moi nhat
 
 const SYSTEM_PROMPT = `You are a data extraction assistant. Read this handwritten math learning diary. Extract the evaluation and output a JSON with exactly these 3 keys:
 - "danh_gia_nhanh": The overall rating (must be one of these exact strings: "Đạt", "Chưa đạt", or leave empty if not clear).
