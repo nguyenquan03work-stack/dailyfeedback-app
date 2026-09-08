@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSpreadsheet } from "@/app/lib/googleSheet";
+import { FIELD_KEYS } from "@/app/lib/fields";
 
 export const dynamic = "force-dynamic";
 
@@ -8,20 +9,13 @@ function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-// Google Sheets stores real dates as a serial number (days since 1899-12-30).
+// Google Sheets stores real dates as a serial (days since 1899-12-30).
 // 25569 = days between that epoch and the Unix epoch (1970-01-01).
 function serialToDate(serial: number): Date {
   return new Date(Math.round((serial - 25569) * 86400000));
 }
 
-/**
- * Normalise any date-ish input to the canonical string "DD/MM/YYYY".
- * Handles:
- *   - a numeric Sheets serial (cell stored as a real Date, e.g. 46237)
- *   - a raw string "03/08/2026" / "3/8/2026" (also '-' or '.' separators)
- *   - an ISO string "2026-08-03"
- * Returns null if it can't be parsed.
- */
+// Normalise any date-ish value to "DD/MM/YYYY", or null.
 function normalizeDate(input: unknown): string | null {
   if (input === null || input === undefined) return null;
 
@@ -33,14 +27,13 @@ function normalizeDate(input: unknown): string | null {
   const s = String(input).trim();
   if (!s) return null;
 
-  // DD/MM/YYYY (day first)
-  let m = s.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
+  let m = s.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/); // DD/MM/YY(YY)
   if (m) {
-    const [, dd, mm, yyyy] = m;
+    const [, dd, mm, yy] = m;
+    const yyyy = yy.length === 2 ? `20${yy}` : yy;
     return `${pad(Number(dd))}/${pad(Number(mm))}/${yyyy}`;
   }
-  // YYYY-MM-DD (ISO)
-  m = s.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+  m = s.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/); // ISO
   if (m) {
     const [, yyyy, mm, dd] = m;
     return `${pad(Number(dd))}/${pad(Number(mm))}/${yyyy}`;
@@ -49,14 +42,8 @@ function normalizeDate(input: unknown): string | null {
 }
 
 // --- Route ----------------------------------------------------------------
-type Payload = {
-  teacher?: string;
-  student?: string;
-  date?: string; // DD/MM/YYYY
-  danh_gia?: string;
-  phan_tram?: string;
-  noi_dung?: string;
-};
+type Entry = { date?: string } & Record<string, string | undefined>;
+type Payload = { teacher?: string; student?: string; entries?: Entry[] };
 
 export async function POST(request: Request) {
   let body: Payload;
@@ -68,11 +55,11 @@ export async function POST(request: Request) {
 
   const teacher = body.teacher?.trim();
   const student = body.student?.trim();
-  const targetDate = normalizeDate(body.date);
+  const entries = Array.isArray(body.entries) ? body.entries : [];
 
-  if (!teacher || !student || !targetDate) {
+  if (!teacher || !student || entries.length === 0) {
     return NextResponse.json(
-      { error: "Missing teacher, student or a valid date (DD/MM/YYYY)" },
+      { error: "Missing teacher, student, or entries" },
       { status: 400 }
     );
   }
@@ -88,44 +75,27 @@ export async function POST(request: Request) {
       );
     }
 
-    // Load Row 1 (the date row) across every column.
+    // Load Row 1 (dates) and build date -> column-index map (raw value first).
     await sheet.loadCells({
       startRowIndex: 0,
       endRowIndex: 1,
       startColumnIndex: 0,
       endColumnIndex: sheet.columnCount,
     });
-
-    // Find the column whose RAW value matches the date.
-    // Merged cells: only the first (anchor) column of the merge holds a value,
-    // so this naturally lands on the first column of the 3-column group.
-    let dateColIndex = -1;
+    const dateToCol = new Map<string, number>();
     for (let col = 0; col < sheet.columnCount; col++) {
       const cell = sheet.getCell(0, col);
-      // Strictly use the raw underlying value first; fall back to the
-      // formatted display only if the raw value can't be parsed.
       const key = normalizeDate(cell.value) ?? normalizeDate(cell.formattedValue);
-      if (key && key === targetDate) {
-        dateColIndex = col;
-        break;
-      }
+      if (key && !dateToCol.has(key)) dateToCol.set(key, col);
     }
 
-    if (dateColIndex === -1) {
-      return NextResponse.json(
-        { error: `Date "${targetDate}" not found in Row 1 of tab "${teacher}"` },
-        { status: 404 }
-      );
-    }
-
-    // Load Column C (index 2) from row 3 (index 2) down, to find the student.
+    // Load Column C (index 2) from row 3 down, find the student row.
     await sheet.loadCells({
       startRowIndex: 2,
       endRowIndex: sheet.rowCount,
       startColumnIndex: 2,
       endColumnIndex: 3,
     });
-
     let studentRow = -1;
     for (let row = 2; row < sheet.rowCount; row++) {
       const v = sheet.getCell(row, 2).value;
@@ -134,7 +104,6 @@ export async function POST(request: Request) {
         break;
       }
     }
-
     if (studentRow === -1) {
       return NextResponse.json(
         { error: `Student "${student}" not found in column C of tab "${teacher}"` },
@@ -142,27 +111,43 @@ export async function POST(request: Request) {
       );
     }
 
-    // Load the 3 target cells at the intersection (student row x date group).
-    await sheet.loadCells({
-      startRowIndex: studentRow,
-      endRowIndex: studentRow + 1,
-      startColumnIndex: dateColIndex,
-      endColumnIndex: dateColIndex + 3,
-    });
+    // For each entry, match date and stage the 3 (N) cells.
+    const results: Array<{ date: string; ok: boolean; reason?: string }> = [];
+    let anyWritten = false;
 
-    sheet.getCell(studentRow, dateColIndex).value = body.danh_gia ?? "";
-    sheet.getCell(studentRow, dateColIndex + 1).value = body.phan_tram ?? "";
-    sheet.getCell(studentRow, dateColIndex + 2).value = body.noi_dung ?? "";
+    for (const entry of entries) {
+      const targetDate = normalizeDate(entry.date);
+      if (!targetDate) {
+        results.push({ date: String(entry.date ?? ""), ok: false, reason: "Ngày không hợp lệ" });
+        continue;
+      }
+      const col = dateToCol.get(targetDate);
+      if (col === undefined) {
+        results.push({ date: targetDate, ok: false, reason: "Không thấy cột ngày này trong Row 1" });
+        continue;
+      }
 
-    await sheet.saveUpdatedCells();
+      await sheet.loadCells({
+        startRowIndex: studentRow,
+        endRowIndex: studentRow + 1,
+        startColumnIndex: col,
+        endColumnIndex: col + FIELD_KEYS.length,
+      });
+      FIELD_KEYS.forEach((key, i) => {
+        sheet.getCell(studentRow, col + i).value = entry[key] ?? "";
+      });
+      anyWritten = true;
+      results.push({ date: targetDate, ok: true });
+    }
+
+    if (anyWritten) await sheet.saveUpdatedCells();
 
     return NextResponse.json({
       ok: true,
       teacher,
       student,
-      date: targetDate,
-      dateColIndex,
       studentRow: studentRow + 1, // 1-based for humans
+      results,
     });
   } catch (err) {
     console.error("update-sheet error:", err);

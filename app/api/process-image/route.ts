@@ -1,28 +1,40 @@
 import { NextResponse } from "next/server";
 import { GoogleGenAI, Type } from "@google/genai";
+import { FIELDS, FIELD_KEYS } from "@/app/lib/fields";
 
-// This route always runs per-request (never at build time).
 export const dynamic = "force-dynamic";
-// Vision calls can take a few seconds; give it room.
 export const maxDuration = 60;
 
 const MODEL = "gemini-flash-latest"; // alias -> luon la ban flash moi nhat
 
-const SYSTEM_PROMPT = `You are a data extraction assistant. Read this handwritten math learning diary. Extract the evaluation and output a JSON with exactly these 3 keys:
-- "danh_gia_nhanh": The overall rating (must be one of these exact strings: "Đạt", "Chưa đạt", or leave empty if not clear).
-- "phan_tram": The completion percentage (e.g., "70%").
-- "noi_dung": The specific learning content or notes (e.g., "- Timo", "- IGCSE", "- Algebra"). Correct any spelling mistakes in the teacher's quick handwriting.`;
+// Build the system prompt from the central fields config.
+const fieldLines = FIELDS.map((f) => `- "${f.key}": ${f.hint}`).join("\n");
+const SYSTEM_PROMPT = `You are a data extraction assistant. Read this handwritten math learning diary page. The page may contain MULTIPLE date blocks — each block starts with a date (e.g. "3/8/26", "05.08.2026"). For EACH date block, output one entry, keeping top-to-bottom order.
 
-// Force Gemini to return exactly the 3 fields we expect.
+Return JSON of the form { "entries": [ ... ] }. Each entry must have:
+- "date": the block's date as DD/MM/YYYY with a 4-digit year (e.g. "3/8/26" -> "03/08/2026", "05.08.2026" -> "05/08/2026").
+${fieldLines}
+
+Correct any spelling mistakes in the teacher's quick handwriting. If a field is missing in a block, use an empty string.`;
+
+// Build the response schema from the central fields config.
+const entryProps: Record<string, { type: Type }> = { date: { type: Type.STRING } };
+for (const key of FIELD_KEYS) entryProps[key] = { type: Type.STRING };
+
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
-    danh_gia_nhanh: { type: Type.STRING },
-    phan_tram: { type: Type.STRING },
-    noi_dung: { type: Type.STRING },
+    entries: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: entryProps,
+        required: ["date", ...FIELD_KEYS],
+      },
+    },
   },
-  required: ["danh_gia_nhanh", "phan_tram", "noi_dung"],
-} as const;
+  required: ["entries"],
+};
 
 export async function POST(request: Request) {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -57,13 +69,8 @@ export async function POST(request: Request) {
         {
           role: "user",
           parts: [
-            {
-              inlineData: {
-                mimeType: mimeType || "image/jpeg",
-                data: image,
-              },
-            },
-            { text: "Extract the evaluation from this learning-diary photo." },
+            { inlineData: { mimeType: mimeType || "image/jpeg", data: image } },
+            { text: "Extract every date block from this learning-diary page." },
           ],
         },
       ],
@@ -77,13 +84,9 @@ export async function POST(request: Request) {
 
     const text = response.text ?? "";
 
-    let data: {
-      danh_gia_nhanh: string;
-      phan_tram: string;
-      noi_dung: string;
-    };
+    let parsed: { entries?: Array<Record<string, unknown>> };
     try {
-      data = JSON.parse(text);
+      parsed = JSON.parse(text);
     } catch {
       return NextResponse.json(
         { error: "Model did not return valid JSON", raw: text },
@@ -91,12 +94,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // Normalise so the frontend always gets all 3 keys as strings.
-    return NextResponse.json({
-      danh_gia_nhanh: data.danh_gia_nhanh ?? "",
-      phan_tram: data.phan_tram ?? "",
-      noi_dung: data.noi_dung ?? "",
+    // Normalise: every entry has date + all field keys as strings.
+    const entries = (parsed.entries ?? []).map((e) => {
+      const out: Record<string, string> = {
+        date: e.date != null ? String(e.date) : "",
+      };
+      for (const key of FIELD_KEYS) out[key] = e[key] != null ? String(e[key]) : "";
+      return out;
     });
+
+    return NextResponse.json({ entries });
   } catch (err) {
     console.error("process-image error:", err);
     const message =
