@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { FIELDS, FIELD_KEYS, emptyValues, type EntryValues } from "@/app/lib/fields";
+import { prepareImage } from "@/app/lib/compressImage";
 
 type Entry = {
   date: string;
@@ -10,15 +11,6 @@ type Entry = {
 };
 
 type SubmitResult = { date: string; ok: boolean; reason?: string };
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
 export default function FeedbackForm() {
   const [teachers, setTeachers] = useState<string[]>([]);
@@ -103,11 +95,11 @@ export default function FeedbackForm() {
     setError(null);
     setResults(null);
     try {
-      const base64 = await fileToBase64(file);
+      const { base64, mimeType } = await prepareImage(file);
       const res = await fetch("/api/process-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: base64, mimeType: file.type }),
+        body: JSON.stringify({ image: base64, mimeType }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to read image");
