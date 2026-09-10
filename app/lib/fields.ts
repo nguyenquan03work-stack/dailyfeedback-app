@@ -25,7 +25,7 @@ export const FIELDS: FieldDef[] = [
     label: "Đánh giá nhanh",
     type: "rating",
     options: ["Đạt", "Chưa đạt"],
-    hint: 'The overall quick rating. Must be exactly "Đạt", "Chưa đạt", or an empty string if not clear.',
+    hint: 'The overall quick rating. Must be exactly "Đạt", "Chưa đạt", or an empty string if not clear or not written.',
   },
   {
     key: "phan_tram",
@@ -36,10 +36,17 @@ export const FIELDS: FieldDef[] = [
   },
   {
     key: "noi_dung",
-    label: "Nội dung học",
+    label: "Nội dung học / Lưu ý",
     type: "textarea",
-    placeholder: "- Timo\n- IGCSE\n- Algebra",
-    hint: 'The specific learning content / notes, e.g. "- Timo", "- IGCSE", "- Algebra". Correct spelling mistakes. Empty string if not present.',
+    placeholder:
+      "Objectives: ...\nKnowledges: ...\nSkills: ...\nAttitude: ...\nHomework: ...\nNotes: ...",
+    hint:
+      "ALL other content of the block, combined into ONE multi-line string. " +
+      "For EACH section found in the block (Objectives, Knowledges, Skills, Attitude, Homework, Notes, or any other labeled section), " +
+      'add one line formatted exactly as "<SectionName>: <content>" (English section name, capitalized, followed by a colon and a space). ' +
+      "Put each section on its own line (separated by \\n). Skip a section entirely if it is empty/not written — do not include empty lines. " +
+      "Example:\\nObjectives: Combine linear equations\\nKnowledges: Can solve problems\\nSkills: -\\nAttitude: Good, focus longer\\nHomework: -\\nNotes: 2 pages, not finished. " +
+      "Correct spelling mistakes in the handwriting. Empty string only if the whole block has no readable content.",
   },
 ];
 
