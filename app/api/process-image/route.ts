@@ -3,7 +3,9 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { FIELDS, FIELD_KEYS } from "@/app/lib/fields";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Vercel Hobby cho phép tối đa 300s. Ảnh nhiều chữ + prompt chi tiết có thể
+// khiến AI xử lý lâu; đặt cao để tránh bị hủy giữa chừng (lỗi 504).
+export const maxDuration = 180;
 
 // Model chính + model dự phòng (nhẹ hơn, ít bị quá tải hơn).
 const PRIMARY_MODEL = "gemini-flash-latest";
@@ -99,7 +101,9 @@ export async function POST(request: Request) {
 
   // Gọi 1 model, có thử lại khi gặp lỗi tạm thời.
   async function callModel(modelName: string) {
-    const delays = [1000, 2500];
+    // Chỉ thử lại 1 lần/model (thay vì 2) để không cộng dồn quá nhiều thời
+    // gian chờ trước khi chuyển sang model dự phòng — ảnh nặng đã tốn đủ lâu rồi.
+    const delays = [800];
     let lastErr: unknown;
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
