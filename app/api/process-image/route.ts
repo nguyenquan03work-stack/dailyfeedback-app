@@ -5,14 +5,24 @@ import { FIELDS, FIELD_KEYS } from "@/app/lib/fields";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MODEL = "gemini-flash-latest"; // alias -> luon la ban flash moi nhat
+// Model chính + model dự phòng (nhẹ hơn, ít bị quá tải hơn).
+const PRIMARY_MODEL = "gemini-flash-latest";
+const FALLBACK_MODEL = "gemini-flash-lite-latest";
+
+const CURRENT_YEAR = new Date().getFullYear();
 
 // Build the system prompt from the central fields config.
 const fieldLines = FIELDS.map((f) => `- "${f.key}": ${f.hint}`).join("\n");
-const SYSTEM_PROMPT = `You are a data extraction assistant. Read this handwritten math learning diary page. The page may contain MULTIPLE date blocks — each block starts with a date (e.g. "3/8/26", "05.08.2026"). For EACH date block, output one entry, keeping top-to-bottom order.
+const SYSTEM_PROMPT = `You are a data extraction assistant reading a handwritten math learning-diary page from a Vietnamese tutoring center.
+
+IMPORTANT: the photo MAY BE ROTATED or sideways. Mentally rotate it and read the handwriting in whatever orientation makes it upright.
+
+The page contains one or MORE blocks. Each block starts with a "Date:" label and has fields such as Objectives, Comments (Knowledges, Skills, Attitude, Homework) and Notes.
+
+For EVERY block that has a Date, output one entry — even if the other fields are hard to read or empty. NEVER skip a block just because some fields are unclear. If any date at all is visible, you MUST return at least one entry.
 
 Return JSON of the form { "entries": [ ... ] }. Each entry must have:
-- "date": the block's date as DD/MM/YYYY with a 4-digit year (e.g. "3/8/26" -> "03/08/2026", "05.08.2026" -> "05/08/2026").
+- "date": the block's date as DD/MM/YYYY. Dates are often written WITHOUT a year (e.g. "05/07", "18/7"); assume the year is ${CURRENT_YEAR}, so "05/07" -> "05/07/${CURRENT_YEAR}".
 ${fieldLines}
 
 Correct any spelling mistakes in the teacher's quick handwriting. If a field is missing in a block, use an empty string.`;
@@ -71,70 +81,84 @@ export async function POST(request: Request) {
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const params = {
-    model: MODEL,
-    contents: [
-      {
-        role: "user" as const,
-        parts: [
-          { inlineData: { mimeType: mimeType || "image/jpeg", data: image } },
-          { text: "Extract every date block from this learning-diary page." },
-        ],
-      },
-    ],
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      responseMimeType: "application/json",
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0,
+  const contents = [
+    {
+      role: "user" as const,
+      parts: [
+        { inlineData: { mimeType: mimeType || "image/jpeg", data: image } },
+        { text: "Extract every date block from this learning-diary page." },
+      ],
     },
+  ];
+  const config = {
+    systemInstruction: SYSTEM_PROMPT,
+    responseMimeType: "application/json",
+    responseSchema: RESPONSE_SCHEMA,
+    temperature: 0,
   };
 
-  // Try up to 4 times, backing off, when Gemini is temporarily overloaded.
-  const delays = [1200, 2500, 4000];
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
-    try {
-      const response = await ai.models.generateContent(params);
-      const text = response.text ?? "";
-
-      let parsed: { entries?: Array<Record<string, unknown>> };
+  // Gọi 1 model, có thử lại khi gặp lỗi tạm thời.
+  async function callModel(modelName: string) {
+    const delays = [1000, 2500];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
-        parsed = JSON.parse(text);
-      } catch {
-        return NextResponse.json(
-          { error: "Model did not return valid JSON", raw: text },
-          { status: 502 }
-        );
+        return await ai.models.generateContent({ model: modelName, contents, config });
+      } catch (err) {
+        lastErr = err;
+        if (attempt < delays.length && isRetryable(err)) {
+          await sleep(delays[attempt]);
+          continue;
+        }
+        throw err;
       }
-
-      const entries = (parsed.entries ?? []).map((e) => {
-        const out: Record<string, string> = {
-          date: e.date != null ? String(e.date) : "",
-        };
-        for (const key of FIELD_KEYS) out[key] = e[key] != null ? String(e[key]) : "";
-        return out;
-      });
-
-      return NextResponse.json({ entries });
-    } catch (err) {
-      lastErr = err;
-      if (attempt < delays.length && isRetryable(err)) {
-        await sleep(delays[attempt]);
-        continue;
-      }
-      break;
     }
+    throw lastErr;
   }
 
-  console.error("process-image error:", lastErr);
-  if (isRetryable(lastErr)) {
-    return NextResponse.json(
-      { error: "Google AI đang quá tải, vui lòng thử lại sau ít giây." },
-      { status: 503 }
-    );
+  try {
+    let response;
+    try {
+      response = await callModel(PRIMARY_MODEL);
+    } catch (err) {
+      // Model chính quá tải -> thử model dự phòng nhẹ hơn.
+      if (isRetryable(err)) {
+        response = await callModel(FALLBACK_MODEL);
+      } else {
+        throw err;
+      }
+    }
+
+    const text = response.text ?? "";
+
+    let parsed: { entries?: Array<Record<string, unknown>> };
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return NextResponse.json(
+        { error: "Model did not return valid JSON", raw: text },
+        { status: 502 }
+      );
+    }
+
+    const entries = (parsed.entries ?? []).map((e) => {
+      const out: Record<string, string> = {
+        date: e.date != null ? String(e.date) : "",
+      };
+      for (const key of FIELD_KEYS) out[key] = e[key] != null ? String(e[key]) : "";
+      return out;
+    });
+
+    return NextResponse.json({ entries });
+  } catch (err) {
+    console.error("process-image error:", err);
+    if (isRetryable(err)) {
+      return NextResponse.json(
+        { error: "Google AI đang quá tải, vui lòng thử lại sau ít giây." },
+        { status: 503 }
+      );
+    }
+    const message = err instanceof Error ? err.message : "Failed to process image";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-  const message =
-    lastErr instanceof Error ? lastErr.message : "Failed to process image";
-  return NextResponse.json({ error: message }, { status: 500 });
 }
