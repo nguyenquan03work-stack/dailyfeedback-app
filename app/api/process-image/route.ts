@@ -7,9 +7,11 @@ export const dynamic = "force-dynamic";
 // khiến AI xử lý lâu; đặt cao để tránh bị hủy giữa chừng (lỗi 504).
 export const maxDuration = 180;
 
-// Model chính + model dự phòng (nhẹ hơn, ít bị quá tải hơn).
-const PRIMARY_MODEL = "gemini-flash-latest";
-const FALLBACK_MODEL = "gemini-flash-lite-latest";
+// Model chính = bản NHẸ (flash-lite): xử lý nhanh hơn rõ rệt, đủ tốt cho
+// việc trích xuất có cấu trúc như thế này.
+// Model dự phòng = bản đầy đủ: dùng khi model nhẹ gặp lỗi tạm thời (quá tải).
+const PRIMARY_MODEL = "gemini-flash-lite-latest";
+const FALLBACK_MODEL = "gemini-flash-latest";
 
 const CURRENT_YEAR = new Date().getFullYear();
 
