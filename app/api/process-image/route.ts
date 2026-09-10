@@ -36,6 +36,16 @@ const RESPONSE_SCHEMA = {
   required: ["entries"],
 };
 
+// Transient errors from Gemini (overload / rate limit) worth retrying.
+function isRetryable(err: unknown): boolean {
+  const msg = String(err instanceof Error ? err.message : err);
+  return /\b(503|429)\b|UNAVAILABLE|overloaded|high demand|RESOURCE_EXHAUSTED/i.test(msg);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export async function POST(request: Request) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -60,54 +70,71 @@ export async function POST(request: Request) {
     );
   }
 
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { inlineData: { mimeType: mimeType || "image/jpeg", data: image } },
-            { text: "Extract every date block from this learning-diary page." },
-          ],
-        },
-      ],
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0,
+  const ai = new GoogleGenAI({ apiKey });
+  const params = {
+    model: MODEL,
+    contents: [
+      {
+        role: "user" as const,
+        parts: [
+          { inlineData: { mimeType: mimeType || "image/jpeg", data: image } },
+          { text: "Extract every date block from this learning-diary page." },
+        ],
       },
-    });
+    ],
+    config: {
+      systemInstruction: SYSTEM_PROMPT,
+      responseMimeType: "application/json",
+      responseSchema: RESPONSE_SCHEMA,
+      temperature: 0,
+    },
+  };
 
-    const text = response.text ?? "";
-
-    let parsed: { entries?: Array<Record<string, unknown>> };
+  // Try up to 4 times, backing off, when Gemini is temporarily overloaded.
+  const delays = [1200, 2500, 4000];
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      return NextResponse.json(
-        { error: "Model did not return valid JSON", raw: text },
-        { status: 502 }
-      );
+      const response = await ai.models.generateContent(params);
+      const text = response.text ?? "";
+
+      let parsed: { entries?: Array<Record<string, unknown>> };
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return NextResponse.json(
+          { error: "Model did not return valid JSON", raw: text },
+          { status: 502 }
+        );
+      }
+
+      const entries = (parsed.entries ?? []).map((e) => {
+        const out: Record<string, string> = {
+          date: e.date != null ? String(e.date) : "",
+        };
+        for (const key of FIELD_KEYS) out[key] = e[key] != null ? String(e[key]) : "";
+        return out;
+      });
+
+      return NextResponse.json({ entries });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < delays.length && isRetryable(err)) {
+        await sleep(delays[attempt]);
+        continue;
+      }
+      break;
     }
-
-    // Normalise: every entry has date + all field keys as strings.
-    const entries = (parsed.entries ?? []).map((e) => {
-      const out: Record<string, string> = {
-        date: e.date != null ? String(e.date) : "",
-      };
-      for (const key of FIELD_KEYS) out[key] = e[key] != null ? String(e[key]) : "";
-      return out;
-    });
-
-    return NextResponse.json({ entries });
-  } catch (err) {
-    console.error("process-image error:", err);
-    const message =
-      err instanceof Error ? err.message : "Failed to process image";
-    return NextResponse.json({ error: message }, { status: 500 });
   }
+
+  console.error("process-image error:", lastErr);
+  if (isRetryable(lastErr)) {
+    return NextResponse.json(
+      { error: "Google AI đang quá tải, vui lòng thử lại sau ít giây." },
+      { status: 503 }
+    );
+  }
+  const message =
+    lastErr instanceof Error ? lastErr.message : "Failed to process image";
+  return NextResponse.json({ error: message }, { status: 500 });
 }
