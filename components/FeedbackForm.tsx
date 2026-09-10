@@ -101,7 +101,19 @@ export default function FeedbackForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: base64, mimeType }),
       });
-      const data = await res.json();
+
+      // Máy chủ đôi khi trả về trang lỗi (HTML) thay vì JSON, ví dụ khi
+      // ảnh vẫn còn quá nặng (413) — bắt riêng để hiện thông báo dễ hiểu.
+      let data: { entries?: Array<Record<string, string>>; error?: string };
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          res.status === 413
+            ? "Ảnh vẫn còn quá nặng, vui lòng chụp lại (ảnh rõ nét thường vẫn đọc được dù chụp gần hơn)."
+            : `Máy chủ gặp sự cố (mã ${res.status}). Vui lòng thử lại sau ít giây.`
+        );
+      }
       if (!res.ok) throw new Error(data.error || "Failed to read image");
 
       const list: Entry[] = (data.entries ?? []).map((e: Record<string, string>) => {
@@ -167,7 +179,12 @@ export default function FeedbackForm() {
           entries: chosen.map((e) => ({ date: e.date, ...e.values })),
         }),
       });
-      const data = await res.json();
+      let data: { results?: SubmitResult[]; error?: string };
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`Máy chủ gặp sự cố (mã ${res.status}). Vui lòng thử lại sau ít giây.`);
+      }
       if (!res.ok) throw new Error(data.error || "Failed to save");
       setResults(data.results ?? []);
     } catch (err) {
